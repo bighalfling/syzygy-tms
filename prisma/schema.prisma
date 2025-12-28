@@ -1,0 +1,226 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Order {
+  id               String      @id @default(uuid())
+  orderRef         String      @unique
+  clientName       String
+  pickupAddress    String
+  pickupDateTime   DateTime?
+  deliveryAddress  String
+  deliveryDateTime DateTime?
+  status           OrderStatus @default(NEW)
+  vehicle          String?
+  driver           String?
+  price            String?
+  notes            String?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  invoice          Invoice?
+  trip             Trip?
+  clientId String?
+  client   Client? @relation(fields: [clientId], references: [id])
+
+  @@index([clientId])
+}
+
+model Vehicle {
+  id        String        @id @default(uuid())
+  code      String?       @unique
+  vin       String?       @db.VarChar(17)
+  plate     String        @unique
+  type      VehicleType   @default(TRUCK)
+  status    VehicleStatus @default(ACTIVE)
+  notes     String?
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  driver    Driver?
+  trips     Trip[]
+}
+
+model Driver {
+  id            String       @id @default(cuid())
+  firstName     String
+  lastName      String
+  phone         String?
+  email         String?
+  nationality   String?
+  licenseNumber String?
+  licenseExpiry DateTime?
+  notes         String?
+  status        DriverStatus @default(ACTIVE)
+  vehicleId     String?      @unique
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  vehicle       Vehicle?     @relation(fields: [vehicleId], references: [id])
+  trips         Trip[]
+
+  @@index([lastName, firstName])
+}
+
+model Trip {
+  id         String     @id @default(cuid())
+  status     TripStatus @default(PLANNED)
+  orderId    String     @unique
+  driverId   String
+  vehicleId  String
+  pickupAt   DateTime?
+  deliveryAt DateTime?
+  notes      String?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  invoice    Invoice?   @relation("TripInvoice")
+  driver     Driver     @relation(fields: [driverId], references: [id])
+  order      Order      @relation(fields: [orderId], references: [id])
+  vehicle    Vehicle    @relation(fields: [vehicleId], references: [id])
+
+  @@index([status])
+  @@index([driverId])
+  @@index([vehicleId])
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  passwordHash String
+  role         UserRole @default(DISPATCHER)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Invoice {
+  id            String        @id @default(cuid())
+  number        String        @unique
+  issueDate     DateTime      @default(now())
+  dueDate       DateTime
+  deliveryDate  DateTime?
+  currency      String        @default("EUR")
+  sellerName    String
+  sellerVat     String?
+  sellerIco     String?
+  sellerDic     String?
+  sellerAddress String
+  buyerName     String
+  buyerVat      String?
+  buyerAddress  String
+  subtotal      Decimal       @default(0)
+  vatAmount     Decimal       @default(0)
+  total         Decimal       @default(0)
+  note          String?
+  status        String        @default("ISSUED")
+  lockedAt      DateTime?
+  orderId       String        @unique
+  tripId        String?       @unique
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  order         Order         @relation(fields: [orderId], references: [id])
+  trip          Trip?         @relation("TripInvoice", fields: [tripId], references: [id])
+  items         InvoiceItem[]
+  clientId String?
+  client   Client? @relation(fields: [clientId], references: [id])
+
+  @@index([clientId])
+
+}
+
+model InvoiceItem {
+  id          String   @id @default(cuid())
+  invoiceId   String
+  description String
+  qty         Int      @default(1)
+  unitPrice   Decimal  @default(0)
+  lineTotal   Decimal  @default(0)
+  vatRate     Decimal  @default(0)
+  vatAmount   Decimal  @default(0)
+  createdAt   DateTime @default(now())
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+}
+
+enum OrderStatus {
+  NEW
+  PLANNED
+  IN_TRANSIT
+  DELIVERED
+  CANCELLED
+  INVOICED
+}
+
+enum VehicleType {
+  TRUCK
+  VAN
+  TRAILER
+  OTHER
+}
+
+enum VehicleStatus {
+  ACTIVE
+  INACTIVE
+  MAINTENANCE
+}
+
+enum DriverStatus {
+  ACTIVE
+  INACTIVE
+  ON_LEAVE
+  SUSPENDED
+}
+
+enum TripStatus {
+  PLANNED
+  IN_PROGRESS
+  DONE
+  CANCELED
+}
+
+enum UserRole {
+  ADMIN
+  DISPATCHER
+  ACCOUNTING
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PAID
+  CANCELED
+}
+
+model Client {
+  id            String   @id @default(cuid())
+
+  name          String
+  street        String
+  city          String
+  zip           String
+  country       String
+
+  companyId     String?
+  taxId         String?
+  vatId         String?
+
+  email         String?
+  phone         String?
+  contactPerson String?
+
+  isVatPayer    Boolean  @default(false)
+  euVat         Boolean  @default(false)
+  note          String?
+
+  orders        Order[]
+  invoices      Invoice[]
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([name])
+  @@index([vatId])
+  @@index([companyId])
+}
