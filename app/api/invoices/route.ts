@@ -4,6 +4,9 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
 
+/**
+ * Helpers
+ */
 function s(v: any): string | undefined {
   if (v === undefined || v === null) return undefined;
   const out = String(v).trim();
@@ -14,38 +17,37 @@ function parseMoneyToDecimal(value: any): Prisma.Decimal {
   const raw = String(value ?? "").trim();
   if (!raw) return new Prisma.Decimal(0);
 
-  // allow "1234,56" and "1 234.56"
+  // accepts "1234.56" or "1 234,56"
   const normalized = raw.replace(/\s+/g, "").replace(",", ".");
   const n = Number(normalized);
-
   if (!Number.isFinite(n)) return new Prisma.Decimal(0);
-  return new Prisma.Decimal(n.toFixed(2));
+  return new Prisma.Decimal(n);
 }
 
 function addDays(d: Date, days: number) {
-  const x = new Date(d);
-  x.setDate(x.getDate() + days);
-  return x;
+  const out = new Date(d);
+  out.setDate(out.getDate() + days);
+  return out;
 }
 
 function formatClientAddress(client: any): string {
-  const parts: string[] = [];
-  const line1 = [client?.street].filter(Boolean).join(" ").trim();
-  if (line1) parts.push(line1);
-
-  const line2 = [client?.zip, client?.city].filter(Boolean).join(" ").trim();
-  if (line2) parts.push(line2);
-
-  const line3 = [client?.country].filter(Boolean).join(" ").trim();
-  if (line3) parts.push(line3);
-
-  return parts.length ? parts.join("\n") : "—";
+  // safe, because schema may vary
+  const parts = [
+    client?.street,
+    client?.zip,
+    client?.city,
+    client?.country,
+  ]
+    .map((x: any) => (x ? String(x).trim() : ""))
+    .filter(Boolean);
+  return parts.length ? parts.join(", ") : "—";
 }
 
-async function generateInvoiceNumber(now = new Date()) {
+async function nextInvoiceNumber(now = new Date()) {
   const year = now.getFullYear();
   const prefix = `INV-${year}-`;
 
+  // find latest invoice that matches this prefix
   const last = await prisma.invoice.findFirst({
     where: { number: { startsWith: prefix } },
     orderBy: { number: "desc" },
@@ -53,8 +55,8 @@ async function generateInvoiceNumber(now = new Date()) {
   });
 
   let seq = 0;
-  if (last?.number) {
-    const tail = last.number.replace(prefix, "");
+  if (last?.number?.startsWith(prefix)) {
+    const tail = last.number.slice(prefix.length);
     const parsed = Number(tail);
     if (Number.isFinite(parsed)) seq = parsed;
   }
@@ -63,6 +65,9 @@ async function generateInvoiceNumber(now = new Date()) {
   return `${prefix}${next}`;
 }
 
+/**
+ * GET /api/invoices
+ */
 export async function GET() {
   const invoices = await prisma.invoice.findMany({
     orderBy: [{ createdAt: "desc" }],
@@ -77,97 +82,89 @@ export async function GET() {
   return NextResponse.json(invoices);
 }
 
+/**
+ * POST /api/invoices
+ * Body:
+ *  - { orderId: string } -> create invoice from order
+ *  - { mode: "manual" }  -> create manual invoice (no order link)
+ */
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const mode = s(body?.mode); // "manual" | undefined
-const orderId = s(body?.orderId);
 
-if (!orderId) {
-  // ===== MANUAL INVOICE CREATE =====
-  const now = new Date();
-  const number = await generateInvoiceNumber(now);
+    const mode = s(body?.mode); // "manual"
+    const orderId = s(body?.orderId);
 
-  const sellerName = process.env.INVOICE_SELLER_NAME || "SYZYGY-LOG s.r.o.";
-  const sellerVat = process.env.INVOICE_SELLER_VAT || null;
-  const sellerIco = process.env.INVOICE_SELLER_ICO || null;
-  const sellerDic = process.env.INVOICE_SELLER_DIC || null;
-  const sellerAddress = process.env.INVOICE_SELLER_ADDRESS || "Bratislava, Slovakia";
+    const now = new Date();
 
-  // из body можно передать buyer, но чтобы “заработало сразу” — ставим заглушки
-  const buyerName = s(body?.buyerName) || "—";
-  const buyerVat = s(body?.buyerVat) || null;
-  const buyerAddress = s(body?.buyerAddress) || "—";
+    // Seller defaults (can be overridden by env)
+    const sellerName = process.env.INVOICE_SELLER_NAME || "SYZYGY-LOG s.r.o.";
+    const sellerVat = process.env.INVOICE_SELLER_VAT || null;
+    const sellerIco = process.env.INVOICE_SELLER_ICO || null;
+    const sellerDic = process.env.INVOICE_SELLER_DIC || null;
+    const sellerAddress =
+      process.env.INVOICE_SELLER_ADDRESS || "Bratislava, Slovakia";
 
-  const issueDate = now;
-  const dueDate = addDays(now, 14);
-  const deliveryDate = body?.deliveryDate ? new Date(body.deliveryDate) : null;
+    // Dates
+    const issueDate = now;
+    const dueDate = addDays(now, 14);
 
-  // items: если не передали — создадим 1 строку-заглушку
-  const itemsRaw = Array.isArray(body?.items) ? body.items : [];
-  const items =
-    itemsRaw.length > 0
-      ? itemsRaw
-      : [{ description: "Service", qty: 1, unitPrice: "0", vatRate: "0" }];
+    // 1) MANUAL invoice (no order connect!)
+    if (mode === "manual") {
+      const number = await nextInvoiceNumber(now);
 
-  // считаем totals
-  const mapped = items.map((it: any) => {
-    const qty = Number(it.qty ?? 1) || 1;
-    const unitPrice = parseMoneyToDecimal(it.unitPrice);
-    const lineTotal = new Prisma.Decimal(unitPrice.toNumber() * qty);
-    const vatRate = parseMoneyToDecimal(it.vatRate ?? 0);
-    const vatAmount = new Prisma.Decimal(0); // пока оставим 0 как у тебя в reverse charge
-    return { description: String(it.description || "Service"), qty, unitPrice, lineTotal, vatRate, vatAmount };
-  });
+      const created = await prisma.invoice.create({
+        data: {
+          number,
+          issueDate,
+          dueDate,
+          deliveryDate: null,
+          currency: "EUR",
+          language: "EN",
 
-  const subtotal = mapped.reduce(
-  (s: Prisma.Decimal, it: any) => s.add(it.lineTotal),
-  new Prisma.Decimal(0)
-);
-  const vatAmount = new Prisma.Decimal(0);
-  const total = subtotal.add(vatAmount);
+          sellerName,
+          sellerVat,
+          sellerIco,
+          sellerDic,
+          sellerAddress,
 
-  const created = await prisma.invoice.create({
-    data: {
-      number,
-      issueDate,
-      dueDate,
-      deliveryDate,
-      currency: "EUR",
+          buyerName: "—",
+          buyerVat: null,
+          buyerAddress: "—",
 
-      sellerName,
-      sellerVat,
-      sellerIco,
-      sellerDic,
-      sellerAddress,
+          subtotal: new Prisma.Decimal(0),
+          vatAmount: new Prisma.Decimal(0),
+          total: new Prisma.Decimal(0),
 
-      buyerName,
-      buyerVat,
-      buyerAddress,
+          note: null,
+          status: "DRAFT",
 
-      subtotal,
-      vatAmount,
-      total,
+          // IMPORTANT: do NOT pass order connect here at all
+          items: {
+            create: [
+              {
+                description: "Service",
+                qty: 1,
+                unitPrice: new Prisma.Decimal(0),
+                lineTotal: new Prisma.Decimal(0),
+                vatRate: new Prisma.Decimal(0),
+                vatAmount: new Prisma.Decimal(0),
+              },
+            ],
+          },
+        },
+        include: { items: true },
+      });
 
-      note: null,
-      status: "ISSUED",
+      return NextResponse.json({ invoice: created }, { status: 201 });
+    }
 
-      order: { connect: { id: orderId } },
-      items: { create: mapped },
-    },
-    select: { id: true },
-  });
-
-  return NextResponse.json({ invoice: created }, { status: 201 });
-}
-
-    // if already invoiced
-    const existing = await prisma.invoice.findUnique({
-      where: { orderId },
-      select: { id: true },
-    });
-    if (existing) {
-      return NextResponse.json({ invoice: existing }, { status: 200 });
+    // 2) Invoice from order
+    if (!orderId) {
+      return NextResponse.json(
+        { message: "orderId is required (or mode=manual)" },
+        { status: 400 }
+      );
     }
 
     const order = await prisma.order.findUnique({
@@ -175,6 +172,7 @@ if (!orderId) {
       include: {
         client: true,
         trip: true,
+        invoice: true,
       },
     });
 
@@ -182,30 +180,39 @@ if (!orderId) {
       return NextResponse.json({ message: "Order not found" }, { status: 404 });
     }
 
-    const now = new Date();
-    const number = await generateInvoiceNumber(now);
+    if (order.invoice) {
+      // already invoiced
+      return NextResponse.json(
+        { message: "Invoice already exists for this order", invoice: order.invoice },
+        { status: 409 }
+      );
+    }
 
-    // seller (ENV -> fallback)
-    const sellerName = process.env.INVOICE_SELLER_NAME || "SYZYGY-LOG s.r.o.";
-    const sellerVat = process.env.INVOICE_SELLER_VAT || null;
-    const sellerIco = process.env.INVOICE_SELLER_ICO || null;
-    const sellerDic = process.env.INVOICE_SELLER_DIC || null;
-    const sellerAddress =
-      process.env.INVOICE_SELLER_ADDRESS ||
-      "Bratislava, Slovakia";
+    const number = await nextInvoiceNumber(now);
 
-    // buyer
+    // Buyer data
     const client = order.client;
     const buyerName = client?.name || order.clientName || "—";
     const buyerVat = client?.vatId || null;
     const buyerAddress = client ? formatClientAddress(client) : "—";
 
-    const price = parseMoneyToDecimal(order.price);
+    // Delivery date from trip/order
+    const deliveryDate =
+      order.trip?.deliveryAt ?? order.deliveryDateTime ?? null;
 
-    // dates
-    const issueDate = now;
-    const dueDate = addDays(now, 14);
-    const deliveryDate = order.trip?.deliveryAt ?? order.deliveryDateTime ?? null;
+    // Single-line service item based on order
+    const net = parseMoneyToDecimal(order.price);
+    const qty = 1;
+
+    const unitPrice = net;
+    const lineTotal = new Prisma.Decimal(unitPrice.toNumber() * qty);
+
+    // For now keep VAT 0 (reverse charge / intl transport)
+    const vatRate = new Prisma.Decimal(0);
+    const vatAmount = new Prisma.Decimal(0);
+
+    const subtotal = lineTotal;
+    const total = subtotal.add(vatAmount);
 
     const serviceDesc = (() => {
       const ref = order.orderRef ?? order.id;
@@ -222,6 +229,7 @@ if (!orderId) {
         dueDate,
         deliveryDate,
         currency: "EUR",
+        language: "EN",
 
         sellerName,
         sellerVat,
@@ -233,34 +241,41 @@ if (!orderId) {
         buyerVat,
         buyerAddress,
 
-        subtotal: price,
-        vatAmount: new Prisma.Decimal(0),
-        total: price,
+        subtotal,
+        vatAmount,
+        total,
 
         note: null,
         status: "ISSUED",
 
+        // ✅ connect order ONLY when we have id
         order: { connect: { id: order.id } },
-        trip: order.trip?.id ? { connect: { id: order.trip.id } } : undefined,
-        client: client?.id ? { connect: { id: client.id } } : undefined,
+
+        // also store clientId if exists (optional)
+        ...(client?.id ? { client: { connect: { id: client.id } } } : {}),
 
         items: {
           create: [
             {
               description: serviceDesc,
-              qty: 1,
-              unitPrice: price,
-              lineTotal: price,
-              vatRate: new Prisma.Decimal(0),
-              vatAmount: new Prisma.Decimal(0),
+              qty,
+              unitPrice,
+              lineTotal,
+              vatRate,
+              vatAmount,
             },
           ],
         },
       },
-      select: { id: true },
+      include: {
+        items: true,
+        order: { include: { client: true } },
+        trip: true,
+        client: true,
+      },
     });
 
-    // optionally mark order as invoiced
+    // Mark order as invoiced
     await prisma.order.update({
       where: { id: order.id },
       data: { status: "INVOICED" },
