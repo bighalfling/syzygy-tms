@@ -78,6 +78,31 @@ export default function InvoicesListPage() {
     }
   }
 
+  async function createManualInvoice() {
+  try {
+    setCreating("manual");
+    setError(null);
+
+    const res = await fetch("/api/invoices", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "manual" }),
+    });
+
+    if (!res.ok) throw new Error((await res.text()) || "Failed to create manual invoice");
+    const data = await res.json();
+
+    const invoiceId = data?.invoice?.id;
+    if (!invoiceId) throw new Error("Created, but missing invoice.id");
+
+    window.location.href = `/invoices/${invoiceId}`;
+  } catch (e: any) {
+    setError(String(e?.message ?? e));
+  } finally {
+    setCreating(null);
+  }
+}
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -96,6 +121,15 @@ export default function InvoicesListPage() {
         >
           {loading ? "Refreshing..." : "Refresh"}
         </button>
+
+        <button
+          className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm hover:opacity-90 disabled:opacity-50"
+          onClick={createManualInvoice}
+          disabled={creating === "manual"}
+        >
+          {creating === "manual" ? "Creating…" : "+ Manual invoice"}
+        </button>
+
       </div>
 
       {error ? (

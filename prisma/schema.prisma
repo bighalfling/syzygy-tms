@@ -103,6 +103,7 @@ model Invoice {
   dueDate       DateTime
   deliveryDate  DateTime?
   currency      String        @default("EUR")
+  language String @default("EN")
   sellerName    String
   sellerVat     String?
   sellerIco     String?
@@ -117,11 +118,11 @@ model Invoice {
   note          String?
   status        String        @default("ISSUED")
   lockedAt      DateTime?
-  orderId       String        @unique
+  orderId       String?        @unique
   tripId        String?       @unique
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
-  order         Order         @relation(fields: [orderId], references: [id])
+  order         Order?         @relation(fields: [orderId], references: [id])
   trip          Trip?         @relation("TripInvoice", fields: [tripId], references: [id])
   items         InvoiceItem[]
   clientId String?

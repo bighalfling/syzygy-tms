@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
 type InvoiceStatus = "DRAFT" | "SENT" | "PAID" | "ISSUED";
+type InvoiceLanguage = "EN" | "SK";
 
 type InvoiceForm = {
   number: string;
@@ -13,6 +14,17 @@ type InvoiceForm = {
   dueDate: string; // YYYY-MM-DD
   status: InvoiceStatus;
   note: string;
+
+  language: InvoiceLanguage;
+
+  buyerName: string;
+  buyerVat: string;
+  buyerAddress: string;
+
+  // Manual (single-line) pricing fields
+  serviceName: string;
+  netAmount: string; // "1000.00"
+  vatRate: string; // "23"
 };
 
 function toDateInput(value: any) {
@@ -31,11 +43,27 @@ function toStatus(v: any): InvoiceStatus {
   return "DRAFT";
 }
 
+function toLang(v: any): InvoiceLanguage {
+  const s = String(v || "EN").toUpperCase();
+  return s === "SK" ? "SK" : "EN";
+}
+
 function money(v: any, cur: string) {
   if (v == null) return "—";
   const n = typeof v === "number" ? v : Number(v?.toString?.() ?? v);
   if (Number.isNaN(n)) return "—";
   return `${n.toFixed(2)} ${cur || ""}`.trim();
+}
+
+function parseNum(v: string): number {
+  const n = Number(String(v ?? "").replace(",", ".").trim());
+  return Number.isFinite(n) ? n : 0;
+}
+
+function fmt2(n: number) {
+  // prevent -0.00
+  const x = Math.abs(n) < 0.0000001 ? 0 : n;
+  return x.toFixed(2);
 }
 
 export default function InvoiceEditPage() {
@@ -56,6 +84,16 @@ export default function InvoiceEditPage() {
     dueDate: "",
     status: "DRAFT",
     note: "",
+
+    language: "EN",
+
+    buyerName: "",
+    buyerVat: "",
+    buyerAddress: "",
+
+    serviceName: "Service",
+    netAmount: "0.00",
+    vatRate: "0",
   });
 
   const pdfUrl = useMemo(() => `/api/invoices/${id}/pdf`, [id]);
@@ -72,6 +110,22 @@ export default function InvoiceEditPage() {
         const inv = await res.json();
 
         setMeta(inv);
+
+        const isManualLoaded = !inv?.orderId && !inv?.order;
+        const firstItem = Array.isArray(inv.items) && inv.items.length > 0 ? inv.items[0] : null;
+
+        // Derive manual pricing from the first item if manual
+        const derivedService = isManualLoaded ? (firstItem?.description ?? "Service") : "Service";
+        const derivedNet =
+          isManualLoaded && firstItem?.lineTotal != null
+            ? String(Number(firstItem.lineTotal?.toString?.() ?? firstItem.lineTotal) || 0)
+            : String(Number(inv.subtotal?.toString?.() ?? inv.subtotal) || 0);
+
+        const derivedVatRate =
+          isManualLoaded && firstItem?.vatRate != null
+            ? String(Number(firstItem.vatRate?.toString?.() ?? firstItem.vatRate) || 0)
+            : String(0);
+
         setForm({
           number: inv.number ?? "",
           issueDate: toDateInput(inv.issueDate),
@@ -79,6 +133,16 @@ export default function InvoiceEditPage() {
           dueDate: toDateInput(inv.dueDate),
           status: toStatus(inv.status),
           note: inv.note ?? "",
+
+          language: toLang(inv.language),
+
+          buyerName: inv.buyerName ?? "",
+          buyerVat: inv.buyerVat ?? "",
+          buyerAddress: inv.buyerAddress ?? "",
+
+          serviceName: derivedService,
+          netAmount: fmt2(parseNum(derivedNet)),
+          vatRate: fmt2(parseNum(derivedVatRate)).replace(/\.00$/, ""), // show "23" not "23.00"
         });
       } catch (e: any) {
         setError(String(e?.message ?? e));
@@ -92,18 +156,39 @@ export default function InvoiceEditPage() {
     setForm((p) => ({ ...p, [key]: value }));
   }
 
+  const isManual = !meta?.orderId && !meta?.order;
+  const currency = meta?.currency ?? "EUR";
+
+  const net = parseNum(form.netAmount);
+  const rate = parseNum(form.vatRate);
+  const vatAmount = (net * rate) / 100;
+  const gross = net + vatAmount;
+
   async function onSave() {
     setSaving(true);
     setError(null);
 
-    const payload = {
+    const payload: any = {
       number: form.number || null,
       issueDate: form.issueDate || null,
       deliveryDate: form.deliveryDate || null,
       dueDate: form.dueDate || null,
       status: form.status,
       note: form.note ?? "",
+      language: form.language,
     };
+
+    if (isManual) {
+      payload.buyerName = form.buyerName || null;
+      payload.buyerVat = form.buyerVat || null;
+      payload.buyerAddress = form.buyerAddress || null;
+
+      // Manual pricing fields
+      payload.serviceName = (form.serviceName || "Service").trim();
+      payload.netAmount = net; // number
+      payload.vatRate = rate; // number
+      // vatAmount/total are computed on server
+    }
 
     try {
       const res = await fetch(`/api/invoices/${id}`, {
@@ -121,6 +206,8 @@ export default function InvoiceEditPage() {
       }
 
       router.refresh();
+      const re = await fetch(`/api/invoices/${id}`, { cache: "no-store" });
+      if (re.ok) setMeta(await re.json());
     } catch (e: any) {
       setError(String(e?.message ?? e));
     } finally {
@@ -128,13 +215,12 @@ export default function InvoiceEditPage() {
     }
   }
 
-  const buyerName = meta?.buyerName ?? meta?.client?.name ?? "—";
+  const buyerNameRO = meta?.buyerName ?? meta?.client?.name ?? "—";
   const orderRef = meta?.order?.orderRef ?? meta?.order?.id ?? null;
-  const totalStr = money(meta?.total, meta?.currency ?? "EUR");
+  const totalStr = money(meta?.total, currency);
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div>
           <Link href="/invoices" className="underline underline-offset-4 hover:opacity-80">
@@ -146,9 +232,22 @@ export default function InvoiceEditPage() {
           <div className="text-sm text-muted-foreground">
             Total: <span className="font-medium text-foreground">{totalStr}</span>
           </div>
+          {isManual ? (
+            <div className="text-xs text-muted-foreground mt-1">Manual invoice (not linked to an order)</div>
+          ) : null}
         </div>
 
         <div className="flex items-center gap-2">
+          <select
+            className="rounded-md border px-3 py-2 text-sm bg-background"
+            value={form.language}
+            onChange={(e) => set("language", (e.target.value as InvoiceLanguage) || "EN")}
+            title="PDF language"
+          >
+            <option value="EN">EN</option>
+            <option value="SK">SK</option>
+          </select>
+
           <select
             className="rounded-md border px-3 py-2 text-sm bg-background"
             value={form.status}
@@ -186,7 +285,10 @@ export default function InvoiceEditPage() {
         </div>
       ) : null}
 
-      {/* BASIC */}
+      {loading ? (
+        <div className="rounded-xl border bg-background p-6 text-sm text-muted-foreground">Loading…</div>
+      ) : null}
+
       <div className="rounded-xl border bg-background p-6 md:p-8 space-y-4">
         <div>
           <div className="text-lg font-medium">Basic</div>
@@ -201,32 +303,75 @@ export default function InvoiceEditPage() {
         </div>
       </div>
 
-      {/* BUYER */}
+      {/* NEW: Manual pricing (only manual invoices) */}
+      {isManual ? (
+        <div className="rounded-xl border bg-background p-6 md:p-8 space-y-4">
+          <div>
+            <div className="text-lg font-medium">Manual pricing</div>
+            <div className="text-sm text-muted-foreground">
+              This updates the single line in PDF table (Služby/Services) and totals.
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="md:col-span-2">
+              <Field label="Service title (table row)" value={form.serviceName} onChange={(v) => set("serviceName", v)} />
+            </div>
+            <Field
+              label="Net amount"
+              value={form.netAmount}
+              onChange={(v) => set("netAmount", v)}
+              inputMode="decimal"
+              placeholder="e.g. 1000.00"
+            />
+            <Field
+              label="VAT %"
+              value={form.vatRate}
+              onChange={(v) => set("vatRate", v)}
+              inputMode="decimal"
+              placeholder="e.g. 23"
+            />
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <ReadOnlyField label="VAT amount (auto)" value={`${fmt2(vatAmount)} ${currency}`} />
+            <ReadOnlyField label="Gross total (auto)" value={`${fmt2(gross)} ${currency}`} />
+            <ReadOnlyField label="Currency" value={currency} />
+          </div>
+        </div>
+      ) : null}
+
       <div className="rounded-xl border bg-background p-6 md:p-8 space-y-4">
         <div>
           <div className="text-lg font-medium">Buyer</div>
-          <div className="text-sm text-muted-foreground">Read-only.</div>
+          <div className="text-sm text-muted-foreground">
+            {isManual ? "Editable." : "Read-only (comes from Order/Client)."}
+          </div>
         </div>
 
-        <label className="block space-y-1">
-          <div className="text-sm text-muted-foreground">Name</div>
-          <input className="w-full rounded-md border px-3 py-2 text-sm bg-muted/30" value={buyerName} disabled />
-        </label>
+        {isManual ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Field label="Name" value={form.buyerName} onChange={(v) => set("buyerName", v)} />
+            <Field label="VAT ID" value={form.buyerVat} onChange={(v) => set("buyerVat", v)} />
+            <div className="md:col-span-2">
+              <Textarea label="Address" value={form.buyerAddress} onChange={(v) => set("buyerAddress", v)} rows={4} />
+            </div>
+          </div>
+        ) : (
+          <label className="block space-y-1">
+            <div className="text-sm text-muted-foreground">Name</div>
+            <input className="w-full rounded-md border px-3 py-2 text-sm bg-muted/30" value={buyerNameRO} disabled />
+          </label>
+        )}
       </div>
 
-      {/* NOTES */}
       <div className="rounded-xl border bg-background p-6 md:p-8 space-y-4">
         <div>
           <div className="text-lg font-medium">Notes</div>
           <div className="text-sm text-muted-foreground">This text appears in PDF.</div>
         </div>
 
-        <Textarea
-          label="Note"
-          value={form.note}
-          onChange={(v) => set("note", v)}
-          rows={6}
-        />
+        <Textarea label="Note" value={form.note} onChange={(v) => set("note", v)} rows={6} />
       </div>
     </div>
   );
@@ -237,11 +382,15 @@ function Field({
   value,
   onChange,
   type = "text",
+  inputMode,
+  placeholder,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   type?: string;
+  inputMode?: React.HTMLAttributes<HTMLInputElement>["inputMode"];
+  placeholder?: string;
 }) {
   return (
     <label className="block space-y-1">
@@ -249,9 +398,20 @@ function Field({
       <input
         className="w-full rounded-md border px-3 py-2 text-sm bg-background"
         type={type}
+        inputMode={inputMode}
+        placeholder={placeholder}
         value={value}
         onChange={(e) => onChange(e.target.value)}
       />
+    </label>
+  );
+}
+
+function ReadOnlyField({ label, value }: { label: string; value: string }) {
+  return (
+    <label className="block space-y-1">
+      <div className="text-sm text-muted-foreground">{label}</div>
+      <input className="w-full rounded-md border px-3 py-2 text-sm bg-muted/30" value={value} disabled />
     </label>
   );
 }

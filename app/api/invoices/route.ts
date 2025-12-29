@@ -80,11 +80,86 @@ export async function GET() {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const orderId = s(body?.orderId);
+    const mode = s(body?.mode); // "manual" | undefined
+const orderId = s(body?.orderId);
 
-    if (!orderId) {
-      return NextResponse.json({ message: "Missing orderId" }, { status: 400 });
-    }
+if (!orderId) {
+  // ===== MANUAL INVOICE CREATE =====
+  const now = new Date();
+  const number = await generateInvoiceNumber(now);
+
+  const sellerName = process.env.INVOICE_SELLER_NAME || "SYZYGY-LOG s.r.o.";
+  const sellerVat = process.env.INVOICE_SELLER_VAT || null;
+  const sellerIco = process.env.INVOICE_SELLER_ICO || null;
+  const sellerDic = process.env.INVOICE_SELLER_DIC || null;
+  const sellerAddress = process.env.INVOICE_SELLER_ADDRESS || "Bratislava, Slovakia";
+
+  // из body можно передать buyer, но чтобы “заработало сразу” — ставим заглушки
+  const buyerName = s(body?.buyerName) || "—";
+  const buyerVat = s(body?.buyerVat) || null;
+  const buyerAddress = s(body?.buyerAddress) || "—";
+
+  const issueDate = now;
+  const dueDate = addDays(now, 14);
+  const deliveryDate = body?.deliveryDate ? new Date(body.deliveryDate) : null;
+
+  // items: если не передали — создадим 1 строку-заглушку
+  const itemsRaw = Array.isArray(body?.items) ? body.items : [];
+  const items =
+    itemsRaw.length > 0
+      ? itemsRaw
+      : [{ description: "Service", qty: 1, unitPrice: "0", vatRate: "0" }];
+
+  // считаем totals
+  const mapped = items.map((it: any) => {
+    const qty = Number(it.qty ?? 1) || 1;
+    const unitPrice = parseMoneyToDecimal(it.unitPrice);
+    const lineTotal = new Prisma.Decimal(unitPrice.toNumber() * qty);
+    const vatRate = parseMoneyToDecimal(it.vatRate ?? 0);
+    const vatAmount = new Prisma.Decimal(0); // пока оставим 0 как у тебя в reverse charge
+    return { description: String(it.description || "Service"), qty, unitPrice, lineTotal, vatRate, vatAmount };
+  });
+
+  const subtotal = mapped.reduce(
+  (s: Prisma.Decimal, it: any) => s.add(it.lineTotal),
+  new Prisma.Decimal(0)
+);
+  const vatAmount = new Prisma.Decimal(0);
+  const total = subtotal.add(vatAmount);
+
+  const created = await prisma.invoice.create({
+    data: {
+      number,
+      issueDate,
+      dueDate,
+      deliveryDate,
+      currency: "EUR",
+
+      sellerName,
+      sellerVat,
+      sellerIco,
+      sellerDic,
+      sellerAddress,
+
+      buyerName,
+      buyerVat,
+      buyerAddress,
+
+      subtotal,
+      vatAmount,
+      total,
+
+      note: null,
+      status: "ISSUED",
+
+      // НЕТ order connect
+      items: { create: mapped },
+    },
+    select: { id: true },
+  });
+
+  return NextResponse.json({ invoice: created }, { status: 201 });
+}
 
     // if already invoiced
     const existing = await prisma.invoice.findUnique({
