@@ -152,7 +152,7 @@ if (!orderId) {
       note: null,
       status: "ISSUED",
 
-      // НЕТ order connect
+      order: { connect: { id: orderId } },
       items: { create: mapped },
     },
     select: { id: true },
